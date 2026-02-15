@@ -19,6 +19,7 @@ from .config import APP_NAME, APP_VERSION
 from .db_molle import DiscSpringStandard, SpringMaterial, SpringMaterialsDB
 from .db_tolleranze import IsoToleranceZone, ToleranceDB, ToleranceMaterial
 from .db_travi import BeamMaterial, BeamMaterialsDB, BeamSectionStandard
+from .db_vite_madrevite import ScrewNutDB, ScrewNutMaterial, ScrewThreadStandard
 from .my_style_01.style import Palette, STYLE_NAME, apply_style
 
 CalcRows = list[tuple[str, str]]
@@ -105,6 +106,7 @@ def _require_ge_zero(label: str, value: float) -> None:
 SPRING_DB = SpringMaterialsDB()
 BEAM_DB = BeamMaterialsDB()
 TOL_DB = ToleranceDB()
+SCREW_DB = ScrewNutDB()
 
 SPRING_TERMINALS_COMPRESSION = (
     "APERTE",
@@ -152,6 +154,27 @@ BEAM_SUPPORT_CHOICES = (
     "INCASTRATA",
     "LIBERA",
 )
+GEAR_X_MODE_BOTH = "Entrambi (x1=x2)"
+GEAR_X_MODE_PINION = "Solo pignone (x2=0)"
+GEAR_X_MODE_WHEEL = "Solo ruota (x1=0)"
+GEAR_X_MODE_CHOICES = (
+    GEAR_X_MODE_BOTH,
+    GEAR_X_MODE_PINION,
+    GEAR_X_MODE_WHEEL,
+)
+SCREW_VM_MODE_FORCE_FROM_TORQUE = "Da coppia a forza"
+SCREW_VM_MODE_TORQUE_FROM_FORCE = "Da forza a coppia"
+SCREW_VM_MODE_CHOICES = (
+    SCREW_VM_MODE_FORCE_FROM_TORQUE,
+    SCREW_VM_MODE_TORQUE_FROM_FORCE,
+)
+_SCREW_THREADS = tuple(SCREW_DB.list_threads())
+SCREW_THREAD_CHOICES = tuple(t.name for t in _SCREW_THREADS) or ("-",)
+SCREW_THREAD_FAMILY_CHOICES = tuple(dict.fromkeys(t.family for t in _SCREW_THREADS)) or ("-",)
+SCREW_THREAD_CHOICES_BY_FAMILY = {
+    family: tuple(t.name for t in _SCREW_THREADS if t.family == family) for family in SCREW_THREAD_FAMILY_CHOICES
+}
+SCREW_MATERIAL_CHOICES = tuple(SCREW_DB.list_material_names()) or ("-",)
 
 
 def _spring_material(material_name: str) -> SpringMaterial:
@@ -224,6 +247,70 @@ def _tol_iso_zone(component: str, code: str, nominal_d_mm: float) -> IsoToleranc
             f"Classe ISO '{code}' non disponibile per {component} al diametro nominale {_fmt_number(nominal_d_mm)} mm."
         )
     return zone
+
+
+def _screw_thread_standard(thread_name: str) -> ScrewThreadStandard:
+    thread = SCREW_DB.get_thread_by_name(thread_name)
+    if thread is None:
+        raise ValueError(f"Filettatura standard '{thread_name}' non presente nel DB.")
+    return thread
+
+
+def _screw_thread_names_by_family(family: str) -> tuple[str, ...]:
+    family_key = (family or "").strip()
+    options = SCREW_THREAD_CHOICES_BY_FAMILY.get(family_key)
+    if options:
+        return options
+    return SCREW_THREAD_CHOICES
+
+
+def _screw_nut_material(material_name: str) -> ScrewNutMaterial:
+    mat = SCREW_DB.get_material_by_name(material_name)
+    if mat is None:
+        raise ValueError(f"Materiale '{material_name}' non presente nel DB vite-madrevite.")
+    return mat
+
+
+def _power_screw_profile_dims(d_mm: float, p_mm: float, thread: ScrewThreadStandard) -> tuple[float, float, float]:
+    same_std = abs(d_mm - thread.d_mm) <= 1e-9 and abs(p_mm - thread.p_mm) <= 1e-9
+    if same_std:
+        return thread.d2_mm, thread.d3_mm, thread.d1_mm
+
+    family = (thread.family or "").strip().upper()
+    if "ISO M" in family:
+        d2 = d_mm - (0.64952 * p_mm)
+        d3 = d_mm - (1.22687 * p_mm)
+        d1 = d_mm - (1.08253 * p_mm)
+    elif "TRAPEZOIDALE" in family:
+        d2 = d_mm - (0.5 * p_mm)
+        d3 = d_mm - p_mm
+        d1 = d_mm - (0.5 * p_mm)
+    else:
+        d2 = d_mm - (0.6 * p_mm)
+        d3 = d_mm - (1.1 * p_mm)
+        d1 = d_mm - (0.8 * p_mm)
+    return d2, d3, d1
+
+
+def _gear_correction_distribution(a_nom: float, module_ref: float, aw_raw: CalcValue, mode_raw: CalcValue) -> tuple[float, float, float, float]:
+    _require_gt_zero("Modulo riferimento", module_ref)
+    aw = a_nom if aw_raw is None else float(aw_raw)
+    _require_gt_zero("Interasse target aw", aw)
+
+    mode = str(mode_raw or GEAR_X_MODE_BOTH).strip()
+    x_tot = (aw - a_nom) / module_ref
+    if mode == GEAR_X_MODE_BOTH:
+        x1 = 0.5 * x_tot
+        x2 = 0.5 * x_tot
+    elif mode == GEAR_X_MODE_PINION:
+        x1 = x_tot
+        x2 = 0.0
+    elif mode == GEAR_X_MODE_WHEEL:
+        x1 = 0.0
+        x2 = x_tot
+    else:
+        raise ValueError("Ripartizione correzione x non valida.")
+    return aw, x_tot, x1, x2
 
 
 def _beam_section_properties(values: dict[str, CalcValue]) -> tuple[str, float, float, float, str]:
@@ -599,6 +686,8 @@ def calc_gear_spur(values: dict[str, float | int | str]) -> CalcRows:
     z2 = int(values["z2"])
     alpha = float(values["alpha"])
     n1 = float(values["n1"])
+    aw_raw = values.get("aw")
+    x_mode = values.get("x_mode")
 
     _require_gt_zero("Modulo", m)
     _require_gt_zero("Denti pignone", z1)
@@ -609,18 +698,27 @@ def calc_gear_spur(values: dict[str, float | int | str]) -> CalcRows:
     i = z2 / z1
     d1 = m * z1
     d2 = m * z2
-    a = 0.5 * (d1 + d2)
-    da1 = d1 + 2.0 * m
-    da2 = d2 + 2.0 * m
-    df1 = d1 - 2.5 * m
-    df2 = d2 - 2.5 * m
+    a_nom = 0.5 * (d1 + d2)
+    aw, x_tot, x1, x2 = _gear_correction_distribution(a_nom, m, aw_raw, x_mode)
+    dw1 = (2.0 * aw * z1) / (z1 + z2)
+    dw2 = (2.0 * aw * z2) / (z1 + z2)
+    da1 = d1 + (2.0 * m * (1.0 + x1))
+    da2 = d2 + (2.0 * m * (1.0 + x2))
+    df1 = d1 - (2.0 * m * (1.25 - x1))
+    df2 = d2 - (2.0 * m * (1.25 - x2))
     pb = math.pi * m * math.cos(math.radians(alpha))
 
     rows: CalcRows = [
         ("Rapporto di trasmissione i", _v(i, digits=6)),
         ("Diametro primitivo pignone d1", _v(d1, "mm")),
         ("Diametro primitivo ruota d2", _v(d2, "mm")),
-        ("Interasse a", _v(a, "mm")),
+        ("Interasse nominale a0", _v(a_nom, "mm")),
+        ("Interasse di lavoro aw", _v(aw, "mm")),
+        ("Correzione totale x_tot", _v(x_tot, digits=6)),
+        ("Correzione pignone x1", _v(x1, digits=6)),
+        ("Correzione ruota x2", _v(x2, digits=6)),
+        ("Diametro primitivo lavoro pignone dw1", _v(dw1, "mm")),
+        ("Diametro primitivo lavoro ruota dw2", _v(dw2, "mm")),
         ("Diametro esterno pignone da1", _v(da1, "mm")),
         ("Diametro esterno ruota da2", _v(da2, "mm")),
         ("Diametro di piede pignone df1", _v(df1, "mm")),
@@ -635,14 +733,20 @@ def calc_gear_spur(values: dict[str, float | int | str]) -> CalcRows:
 def calc_gear_helical(values: dict[str, float | int | str]) -> CalcRows:
     mn = float(values["mn"])
     beta = float(values["beta"])
+    alpha = float(values.get("alpha", 20.0))
     z1 = int(values["z1"])
     z2 = int(values["z2"])
     n1 = float(values["n1"])
+    aw_raw = values.get("aw")
+    x_mode = values.get("x_mode")
 
     _require_gt_zero("Modulo normale", mn)
+    _require_gt_zero("Angolo di pressione", alpha)
     _require_gt_zero("Denti pignone", z1)
     _require_gt_zero("Denti ruota", z2)
     _require_ge_zero("Velocita pignone", n1)
+    if alpha >= 89.0:
+        raise ValueError("Angolo di pressione troppo elevato.")
     if abs(beta) >= 89.0:
         raise ValueError("Angolo elica troppo elevato.")
 
@@ -654,18 +758,38 @@ def calc_gear_helical(values: dict[str, float | int | str]) -> CalcRows:
     i = z2 / z1
     d1 = mt * z1
     d2 = mt * z2
-    a = 0.5 * (d1 + d2)
+    a_nom = 0.5 * (d1 + d2)
+    aw, x_tot, x1, x2 = _gear_correction_distribution(a_nom, mt, aw_raw, x_mode)
+    dw1 = (2.0 * aw * z1) / (z1 + z2)
+    dw2 = (2.0 * aw * z2) / (z1 + z2)
+    da1 = d1 + (2.0 * mt * (1.0 + x1))
+    da2 = d2 + (2.0 * mt * (1.0 + x2))
+    df1 = d1 - (2.0 * mt * (1.25 - x1))
+    df2 = d2 - (2.0 * mt * (1.25 - x2))
     pn = math.pi * mn
+    pbn = pn * math.cos(math.radians(alpha))
     tan_b = math.tan(math.radians(beta))
     px = float("inf") if abs(tan_b) < 1e-9 else pn / tan_b
 
     rows: CalcRows = [
         ("Rapporto di trasmissione i", _v(i, digits=6)),
         ("Modulo trasversale mt", _v(mt, "mm")),
+        ("Angolo pressione alpha", _v(alpha, "gradi")),
         ("Diametro primitivo pignone d1", _v(d1, "mm")),
         ("Diametro primitivo ruota d2", _v(d2, "mm")),
-        ("Interasse a", _v(a, "mm")),
+        ("Interasse nominale a0", _v(a_nom, "mm")),
+        ("Interasse di lavoro aw", _v(aw, "mm")),
+        ("Correzione totale x_tot", _v(x_tot, digits=6)),
+        ("Correzione pignone x1", _v(x1, digits=6)),
+        ("Correzione ruota x2", _v(x2, digits=6)),
+        ("Diametro primitivo lavoro pignone dw1", _v(dw1, "mm")),
+        ("Diametro primitivo lavoro ruota dw2", _v(dw2, "mm")),
+        ("Diametro esterno pignone da1", _v(da1, "mm")),
+        ("Diametro esterno ruota da2", _v(da2, "mm")),
+        ("Diametro di piede pignone df1", _v(df1, "mm")),
+        ("Diametro di piede ruota df2", _v(df2, "mm")),
         ("Passo normale pn", _v(pn, "mm")),
+        ("Passo base normale pbn", _v(pbn, "mm")),
         ("Passo assiale px", _v(px, "mm") if math.isfinite(px) else "infinito (beta=0)"),
     ]
     if n1 > 0:
@@ -719,15 +843,19 @@ def calc_gear_bevel_spur(values: dict[str, float | int | str]) -> CalcRows:
 def calc_gear_bevel_helical(values: dict[str, float | int | str]) -> CalcRows:
     mn = float(values["mn"])
     beta = float(values["beta"])
+    alpha = float(values.get("alpha", 20.0))
     z1 = int(values["z1"])
     z2 = int(values["z2"])
     sigma = float(values["sigma"])
 
     _require_gt_zero("Modulo normale", mn)
+    _require_gt_zero("Angolo di pressione", alpha)
     _require_gt_zero("Denti pignone", z1)
     _require_gt_zero("Denti ruota", z2)
     if sigma <= 0 or sigma >= 180:
         raise ValueError("Angolo assi sigma deve essere compreso tra 0 e 180 gradi.")
+    if alpha >= 89.0:
+        raise ValueError("Angolo di pressione troppo elevato.")
     if abs(beta) >= 89.0:
         raise ValueError("Angolo elica troppo elevato.")
 
@@ -751,6 +879,7 @@ def calc_gear_bevel_helical(values: dict[str, float | int | str]) -> CalcRows:
     return [
         ("Rapporto di trasmissione i", _v(i, digits=6)),
         ("Modulo trasversale mt", _v(mt, "mm")),
+        ("Angolo pressione alpha", _v(alpha, "gradi")),
         ("Diametro primitivo pignone d1", _v(d1, "mm")),
         ("Diametro primitivo ruota d2", _v(d2, "mm")),
         ("Angolo cono pignone delta1", _v(delta1, "gradi")),
@@ -792,6 +921,146 @@ def calc_gear_worm(values: dict[str, float | int | str]) -> CalcRows:
     if n1 > 0:
         rows.append(("Velocita ruota n2", _v(n1 / i, "rpm")))
     return rows
+
+
+def calc_power_screw(values: dict[str, CalcValue]) -> CalcRows:
+    thread_name = str(values["vm_thread_std"]).strip()
+    if not thread_name or thread_name == "-":
+        raise ValueError("Seleziona una filettatura standard da DB.")
+    thread = _screw_thread_standard(thread_name)
+
+    d = float(values["vm_d"])
+    p = float(values["vm_p"])
+    mu = float(values["vm_mu"])
+    Le = float(values["vm_Le"])
+    mode = str(values["vm_mode"]).strip()
+    T_in = values.get("vm_T")
+    F_in = values.get("vm_F")
+
+    _require_gt_zero("Diametro vite d", d)
+    _require_gt_zero("Passo p", p)
+    _require_gt_zero("Lunghezza madrevite Le", Le)
+    _require_ge_zero("Attrito mu", mu)
+
+    mat_screw_name = str(values["vm_mat_screw"]).strip()
+    mat_nut_name = str(values["vm_mat_nut"]).strip()
+    if not mat_screw_name or mat_screw_name == "-":
+        raise ValueError("Seleziona il materiale vite da DB.")
+    if not mat_nut_name or mat_nut_name == "-":
+        raise ValueError("Seleziona il materiale madrevite da DB.")
+
+    mat_screw = _screw_nut_material(mat_screw_name)
+    mat_nut = _screw_nut_material(mat_nut_name)
+
+    d2, d3, d1 = _power_screw_profile_dims(d, p, thread)
+    if d2 <= 0 or d3 <= 0 or d1 <= 0:
+        raise ValueError("Geometria filettatura non valida (diametri interni <= 0).")
+
+    lambda_rad = math.atan(p / (math.pi * d2))
+    half_flank_rad = math.radians(thread.flank_angle_deg * 0.5)
+    cos_half = math.cos(half_flank_rad)
+    if abs(cos_half) < 1e-9:
+        raise ValueError("Angolo filettatura non valido.")
+    rho_rad = math.atan(mu / cos_half)
+    den = math.tan(lambda_rad + rho_rad)
+    if den <= 0:
+        raise ValueError("Configurazione attrito/elica non valida.")
+
+    if mode == SCREW_VM_MODE_FORCE_FROM_TORQUE:
+        if T_in is None:
+            raise ValueError("Compila la coppia T per il modo 'Da coppia a forza'.")
+        T_nm = float(T_in)
+        _require_gt_zero("Coppia T", T_nm)
+        T_nmm = T_nm * 1000.0
+        F = (2.0 * T_nmm) / (d2 * den)
+    elif mode == SCREW_VM_MODE_TORQUE_FROM_FORCE:
+        if F_in is None:
+            raise ValueError("Compila la forza F per il modo 'Da forza a coppia'.")
+        F = float(F_in)
+        _require_gt_zero("Forza assiale F", F)
+        T_nmm = F * (d2 * 0.5) * den
+        T_nm = T_nmm / 1000.0
+    else:
+        raise ValueError("Modo calcolo vite-madrevite non valido.")
+
+    eta_den = math.tan(lambda_rad + rho_rad)
+    eta = math.tan(lambda_rad) / eta_den if abs(eta_den) > 1e-12 else 0.0
+    is_self_locking = lambda_rad <= rho_rad
+
+    area_core = math.pi * d3**2 / 4.0
+    sigma_ax = F / area_core
+    tau_tor = (16.0 * T_nmm) / (math.pi * d3**3)
+    sigma_vm = math.sqrt(sigma_ax**2 + (3.0 * tau_tor**2))
+
+    area_press = 0.5 * math.pi * d2 * Le
+    p_bearing = F / area_press
+
+    area_shear_screw = 0.5 * math.pi * d3 * Le
+    area_shear_nut = 0.5 * math.pi * d1 * Le
+    tau_thread_screw = F / area_shear_screw
+    tau_thread_nut = F / area_shear_nut
+
+    def _sf(limit_value: float, stress_value: float) -> float:
+        if stress_value <= 1e-12:
+            return float("inf")
+        return limit_value / stress_value
+
+    sf_vm_screw = _sf(mat_screw.sigma_amm_mpa, sigma_vm)
+    sf_tau_screw = _sf(mat_screw.tau_amm_mpa, tau_thread_screw)
+    sf_press_nut = _sf(mat_nut.sigma_amm_mpa, p_bearing)
+    sf_tau_nut = _sf(mat_nut.tau_amm_mpa, tau_thread_nut)
+    sf_min_global = min(sf_vm_screw, sf_tau_screw, sf_press_nut, sf_tau_nut)
+
+    screw_ok = sigma_vm <= mat_screw.sigma_amm_mpa and tau_thread_screw <= mat_screw.tau_amm_mpa
+    nut_ok = p_bearing <= mat_nut.sigma_amm_mpa and tau_thread_nut <= mat_nut.tau_amm_mpa
+    overall_ok = screw_ok and nut_ok
+
+    return [
+        ("Geometria filettatura", ""),
+        ("Standard selezionato", thread.name),
+        ("Famiglia", thread.family),
+        ("Diametro nominale d", _v(d, "mm")),
+        ("Passo p", _v(p, "mm")),
+        ("Diametro medio d2", _v(d2, "mm")),
+        ("Diametro nocciolo vite d3", _v(d3, "mm")),
+        ("Diametro interno madrevite d1", _v(d1, "mm")),
+        ("Angolo elica lambda", _v(math.degrees(lambda_rad), "gradi")),
+        ("Angolo attrito ridotto rho", _v(math.degrees(rho_rad), "gradi")),
+        ("Rendimento eta", _v(eta * 100.0, "%")),
+        ("Autobloccaggio", "SI" if is_self_locking else "NO"),
+        ("", ""),
+        ("Funzionamento", ""),
+        ("Modo calcolo", mode),
+        ("Coppia T", _v(T_nm, "Nm")),
+        ("Forza assiale F", _v(F, "N")),
+        ("Lunghezza madrevite Le", _v(Le, "mm")),
+        ("Attrito mu", _v(mu, digits=4)),
+        ("", ""),
+        ("Verifica vite", ""),
+        ("Materiale vite", mat_screw.name),
+        ("Sigma assiale vite", _v(sigma_ax, "MPa")),
+        ("Tau torsionale vite", _v(tau_tor, "MPa")),
+        ("Sigma equivalente von Mises", _v(sigma_vm, "MPa")),
+        ("Sigma amm vite", _v(mat_screw.sigma_amm_mpa, "MPa")),
+        ("Tau amm vite", _v(mat_screw.tau_amm_mpa, "MPa")),
+        ("SF sigma_vM vite", _v(sf_vm_screw, digits=4)),
+        ("SF tau filetto vite", _v(sf_tau_screw, digits=4)),
+        ("Esito vite", "OK" if screw_ok else "NON OK"),
+        ("", ""),
+        ("Verifica madrevite", ""),
+        ("Materiale madrevite", mat_nut.name),
+        ("Pressione media filetto", _v(p_bearing, "MPa")),
+        ("Tau filetto madrevite", _v(tau_thread_nut, "MPa")),
+        ("Pressione amm madrevite", _v(mat_nut.sigma_amm_mpa, "MPa")),
+        ("Tau amm madrevite", _v(mat_nut.tau_amm_mpa, "MPa")),
+        ("SF pressione madrevite", _v(sf_press_nut, digits=4)),
+        ("SF tau filetto madrevite", _v(sf_tau_nut, digits=4)),
+        ("Esito madrevite", "OK" if nut_ok else "NON OK"),
+        ("", ""),
+        ("Riepilogo", ""),
+        ("SF minimo globale", _v(sf_min_global, digits=4)),
+        ("Esito globale", "OK" if overall_ok else "NON OK"),
+    ]
 
 
 def calc_spring_comp_round(values: dict[str, CalcValue]) -> CalcRows:
@@ -1963,6 +2232,14 @@ GEAR_CALCS: list[tuple[str, str, Sequence[FieldSpec], CalcFn]] = [
             FieldSpec("z2", "Denti ruota z2", "40", field_type="int"),
             FieldSpec("alpha", "Angolo pressione alpha", "20", "gradi"),
             FieldSpec("n1", "Velocita pignone n1", "1200", "rpm"),
+            FieldSpec("aw", "Interasse target aw", "", "mm", field_type="float_optional"),
+            FieldSpec(
+                "x_mode",
+                "Ripartizione correzione x",
+                GEAR_X_MODE_BOTH,
+                field_type="choice",
+                choices=GEAR_X_MODE_CHOICES,
+            ),
         ),
         calc_gear_spur,
     ),
@@ -1972,9 +2249,18 @@ GEAR_CALCS: list[tuple[str, str, Sequence[FieldSpec], CalcFn]] = [
         (
             FieldSpec("mn", "Modulo normale mn", "2", "mm"),
             FieldSpec("beta", "Angolo elica beta", "15", "gradi"),
+            FieldSpec("alpha", "Angolo pressione alpha", "20", "gradi"),
             FieldSpec("z1", "Denti pignone z1", "18", field_type="int"),
             FieldSpec("z2", "Denti ruota z2", "54", field_type="int"),
             FieldSpec("n1", "Velocita pignone n1", "1500", "rpm"),
+            FieldSpec("aw", "Interasse target aw", "", "mm", field_type="float_optional"),
+            FieldSpec(
+                "x_mode",
+                "Ripartizione correzione x",
+                GEAR_X_MODE_BOTH,
+                field_type="choice",
+                choices=GEAR_X_MODE_CHOICES,
+            ),
         ),
         calc_gear_helical,
     ),
@@ -1995,6 +2281,7 @@ GEAR_CALCS: list[tuple[str, str, Sequence[FieldSpec], CalcFn]] = [
         (
             FieldSpec("mn", "Modulo normale mn", "3", "mm"),
             FieldSpec("beta", "Angolo elica beta", "25", "gradi"),
+            FieldSpec("alpha", "Angolo pressione alpha", "20", "gradi"),
             FieldSpec("z1", "Denti pignone z1", "16", field_type="int"),
             FieldSpec("z2", "Denti ruota z2", "32", field_type="int"),
             FieldSpec("sigma", "Angolo assi sigma", "90", "gradi"),
@@ -2012,6 +2299,54 @@ GEAR_CALCS: list[tuple[str, str, Sequence[FieldSpec], CalcFn]] = [
             FieldSpec("n1", "Velocita vite n1", "1400", "rpm"),
         ),
         calc_gear_worm,
+    ),
+    (
+        "Vite madrevite",
+        "Calcolo preliminare sistema vite-madrevite: forza/coppia, rendimento e verifiche.",
+        (
+            FieldSpec(
+                "vm_thread_family",
+                "Tipo filettatura",
+                SCREW_THREAD_FAMILY_CHOICES[0],
+                field_type="choice",
+                choices=SCREW_THREAD_FAMILY_CHOICES,
+            ),
+            FieldSpec(
+                "vm_thread_std",
+                "Dimensione filettatura",
+                _screw_thread_names_by_family(SCREW_THREAD_FAMILY_CHOICES[0])[0],
+                field_type="choice",
+                choices=SCREW_THREAD_CHOICES,
+            ),
+            FieldSpec("vm_d", "Diametro vite d", "20", "mm"),
+            FieldSpec("vm_p", "Passo p", "4", "mm"),
+            FieldSpec("vm_mu", "Attrito mu", "0.12"),
+            FieldSpec(
+                "vm_mat_nut",
+                "Materiale madrevite",
+                SCREW_MATERIAL_CHOICES[0],
+                field_type="choice",
+                choices=SCREW_MATERIAL_CHOICES,
+            ),
+            FieldSpec("vm_Le", "Lunghezza madrevite Le", "24", "mm"),
+            FieldSpec(
+                "vm_mat_screw",
+                "Materiale vite",
+                SCREW_MATERIAL_CHOICES[0],
+                field_type="choice",
+                choices=SCREW_MATERIAL_CHOICES,
+            ),
+            FieldSpec(
+                "vm_mode",
+                "Modo calcolo",
+                SCREW_VM_MODE_FORCE_FROM_TORQUE,
+                field_type="choice",
+                choices=SCREW_VM_MODE_CHOICES,
+            ),
+            FieldSpec("vm_T", "Coppia T", "", "Nm", field_type="float_optional"),
+            FieldSpec("vm_F", "Forza assiale F", "", "N", field_type="float_optional"),
+        ),
+        calc_power_screw,
     ),
 ]
 

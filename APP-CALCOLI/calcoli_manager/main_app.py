@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from typing import Sequence
+from typing import Callable, Sequence
 import tkinter.font as tkfont
 
 try:
@@ -31,6 +31,10 @@ from .calculation_engine import (
     TOL_DB,
     DISC_SPRING_SOURCE_DB,
     GEAR_CALCS,
+    SCREW_DB,
+    SCREW_THREAD_FAMILY_CHOICES,
+    SCREW_VM_MODE_FORCE_FROM_TORQUE,
+    SCREW_VM_MODE_TORQUE_FROM_FORCE,
     SPRING_CALC_MODE_DEF_FROM_FORCE,
     SPRING_DB,
     SPRING_MAT_FIELD_KEYS,
@@ -48,10 +52,74 @@ from .calculation_engine import (
     calc_tolerance_fit_iso_thermal,
     _disc_spring_standard,
     _fmt_number,
+    _screw_thread_names_by_family,
+    _screw_thread_standard,
     _spring_material,
     get_beam_calcs,
     get_spring_calcs,
 )
+
+GEAR_TAB_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Cilindrici",
+        (
+            ("Diritti", "Cilindrici diritti"),
+            ("Elicoidali", "Cilindrici elicoidali"),
+        ),
+    ),
+    (
+        "Conici",
+        (
+            ("Diritti", "Conici diritti"),
+            ("Elicoidali", "Conici elicoidali"),
+        ),
+    ),
+)
+GEAR_GROUPED_TITLES = {calc_title for _group_title, group_tabs in GEAR_TAB_GROUPS for _tab_label, calc_title in group_tabs}
+GEAR_PANEL_TITLES = GEAR_GROUPED_TITLES | {"Vite senza fine"}
+SCREW_NUT_PANEL_TITLE = "Vite madrevite"
+
+
+def _parse_first_number(text: str) -> float | None:
+    token = (text or "").strip().split(" ", 1)[0].replace(",", ".")
+    try:
+        return float(token)
+    except Exception:
+        return None
+
+
+def _result_line_tag(label: str, value_txt: str) -> str:
+    label_l = (label or "").strip().lower()
+    value_u = (value_txt or "").strip().upper()
+    if "NON OK" in value_u:
+        return "err_line"
+    if value_u == "OK" or value_u.startswith("OK "):
+        return "ok_line"
+    if label_l.startswith("sf "):
+        sf_val = _parse_first_number(value_txt)
+        if sf_val is None:
+            return ""
+        return "ok_line" if sf_val >= 1.0 else "err_line"
+    return ""
+
+
+def _render_results_colored(textbox: ctk.CTkTextbox, rows: CalcRows, palette: Palette) -> None:
+    textbox.configure(state="normal")
+    textbox.delete("1.0", "end")
+    textbox.tag_config("ok_line", foreground=palette.ok)
+    textbox.tag_config("err_line", foreground=palette.err)
+    for label, value in rows:
+        value_txt = str(value or "").strip()
+        if not value_txt:
+            textbox.insert("end", f"\n{label}\n")
+            continue
+        line = f"{label}: {value}\n"
+        tag = _result_line_tag(label, value_txt)
+        if tag:
+            textbox.insert("end", line, tag)
+        else:
+            textbox.insert("end", line)
+    textbox.configure(state="disabled")
 
 
 class BeamBendingPanel(ctk.CTkFrame):
@@ -635,15 +703,7 @@ class BeamBendingPanel(ctk.CTkFrame):
         return out
 
     def _show_results(self, rows: CalcRows) -> None:
-        self.txt_results.configure(state="normal")
-        self.txt_results.delete("1.0", "end")
-        for label, value in rows:
-            val = str(value or "").strip()
-            if not val:
-                self.txt_results.insert("end", f"\n{label}\n")
-            else:
-                self.txt_results.insert("end", f"{label}: {value}\n")
-        self.txt_results.configure(state="disabled")
+        _render_results_colored(self.txt_results, rows, self.palette)
 
     def _draw_diagrams(self) -> None:
         self.canvas.delete("all")
@@ -1268,15 +1328,7 @@ class BeamTorsionPanel(ctk.CTkFrame):
         return out
 
     def _show_results(self, rows: CalcRows) -> None:
-        self.txt_results.configure(state="normal")
-        self.txt_results.delete("1.0", "end")
-        for label, value in rows:
-            val = str(value or "").strip()
-            if not val:
-                self.txt_results.insert("end", f"\n{label}\n")
-            else:
-                self.txt_results.insert("end", f"{label}: {value}\n")
-        self.txt_results.configure(state="disabled")
+        _render_results_colored(self.txt_results, rows, self.palette)
 
     def _draw_diagrams(self) -> None:
         self.canvas.delete("all")
@@ -1602,15 +1654,7 @@ class FitTolerancePanel(ctk.CTkFrame):
         return out
 
     def _show_results(self, rows: CalcRows) -> None:
-        self.txt_results.configure(state="normal")
-        self.txt_results.delete("1.0", "end")
-        for label, value in rows:
-            val = str(value or "").strip()
-            if not val:
-                self.txt_results.insert("end", f"\n{label}\n")
-            else:
-                self.txt_results.insert("end", f"{label}: {value}\n")
-        self.txt_results.configure(state="disabled")
+        _render_results_colored(self.txt_results, rows, self.palette)
 
     def _draw_interval(self, x1: float, x2: float, y: float, color: str, label: str) -> None:
         self.canvas.create_line(x1, y, x2, y, fill=color, width=8, capstyle="round")
@@ -1825,36 +1869,7 @@ class CalculatorPanel(ctk.CTkFrame):
             unit_lbl.grid(row=row, column=col_base + 2, sticky="w", padx=6, pady=6)
             self.unit_labels[spec.key] = unit_lbl
 
-        paired_rows = (
-            ("mat_e", "mat_g"),
-            ("mat_sigma_amm", "mat_tau_amm"),
-            ("matb_e", "matb_g"),
-            ("matb_sigma_amm", "matb_tau_amm"),
-            ("b_fixed", "b_free"),
-            ("tazza_source", "tazza_std"),
-            ("n_series", "n_parallel"),
-            ("f1", "f2"),
-            ("F1", "F2"),
-        )
-        pair_first_to_second = {a: b for a, b in paired_rows}
-        pair_second_set = {b for _a, b in paired_rows}
-        fields_by_key = {f.key: f for f in self.fields}
-
-        row_idx = 1
-        for spec in self.fields:
-            if spec.key in pair_second_set:
-                continue
-            if spec.key in pair_first_to_second:
-                _add_field(spec, row_idx, 0)
-                pair_key = pair_first_to_second[spec.key]
-                pair_spec = fields_by_key.get(pair_key)
-                if pair_spec is not None:
-                    _add_field(pair_spec, row_idx, 3)
-                row_idx += 1
-                continue
-
-            _add_field(spec, row_idx, 0)
-            row_idx += 1
+        row_idx = self._layout_input_fields(left, _add_field)
 
         btns = ctk.CTkFrame(left, fg_color="transparent")
         btns.grid(row=row_idx, column=0, columnspan=6, sticky="w", padx=10, pady=(10, 10))
@@ -1894,6 +1909,190 @@ class CalculatorPanel(ctk.CTkFrame):
         if mode_var is not None:
             mode_var.trace_add("write", self._on_mode_change)
             self.after(0, self._apply_mode_inputs_state)
+        vm_mode_var = self.vars.get("vm_mode")
+        if vm_mode_var is not None:
+            vm_mode_var.trace_add("write", self._on_mode_change)
+            self.after(0, self._apply_mode_inputs_state)
+
+        vm_thread_family_var = self.vars.get("vm_thread_family")
+        vm_thread_var = self.vars.get("vm_thread_std")
+        if vm_thread_family_var is not None and vm_thread_var is not None and self._has_screw_thread_family_fields():
+            vm_thread_family_var.trace_add("write", self._on_screw_thread_family_change)
+            vm_thread_var.trace_add("write", self._on_screw_thread_change)
+            self.after(0, self._on_screw_thread_family_change)
+        elif vm_thread_var is not None and self._has_screw_thread_fields():
+            vm_thread_var.trace_add("write", self._on_screw_thread_change)
+            self.after(0, self._load_screw_thread_from_selection)
+
+    def _layout_input_fields(self, left, add_field: Callable[[FieldSpec, int, int], None]) -> int:
+        if self.title == SCREW_NUT_PANEL_TITLE:
+            return self._layout_power_screw_fields(left, add_field)
+        if self.title in GEAR_PANEL_TITLES:
+            return self._layout_gear_fields(left, add_field)
+
+        paired_rows = (
+            ("mat_e", "mat_g"),
+            ("mat_sigma_amm", "mat_tau_amm"),
+            ("matb_e", "matb_g"),
+            ("matb_sigma_amm", "matb_tau_amm"),
+            ("b_fixed", "b_free"),
+            ("tazza_source", "tazza_std"),
+            ("n_series", "n_parallel"),
+            ("f1", "f2"),
+            ("F1", "F2"),
+        )
+        pair_first_to_second = {a: b for a, b in paired_rows}
+        pair_second_set = {b for _a, b in paired_rows}
+        fields_by_key = {f.key: f for f in self.fields}
+
+        row_idx = 1
+        for spec in self.fields:
+            if spec.key in pair_second_set:
+                continue
+            if spec.key in pair_first_to_second:
+                add_field(spec, row_idx, 0)
+                pair_key = pair_first_to_second[spec.key]
+                pair_spec = fields_by_key.get(pair_key)
+                if pair_spec is not None:
+                    add_field(pair_spec, row_idx, 3)
+                row_idx += 1
+                continue
+
+            add_field(spec, row_idx, 0)
+            row_idx += 1
+
+        return row_idx
+
+    def _layout_power_screw_fields(self, left, add_field: Callable[[FieldSpec, int, int], None]) -> int:
+        fields_by_key = {f.key: f for f in self.fields}
+        used_keys: set[str] = set()
+        row_idx = 1
+
+        ctk.CTkLabel(left, text="Dati comuni", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=row_idx, column=0, columnspan=6, sticky="w", padx=10, pady=(8, 2)
+        )
+        row_idx += 1
+        common_keys = ("vm_thread_family", "vm_thread_std", "vm_d", "vm_p", "vm_mu")
+        for key in common_keys:
+            spec = fields_by_key.get(key)
+            if spec is None:
+                continue
+            add_field(spec, row_idx, 0)
+            used_keys.add(key)
+            row_idx += 1
+
+        ctk.CTkLabel(left, text="Dati madrevite", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=row_idx, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2)
+        )
+        ctk.CTkLabel(left, text="Dati vite", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=row_idx, column=3, columnspan=3, sticky="w", padx=10, pady=(8, 2)
+        )
+        row_idx += 1
+
+        left_keys = ("vm_mat_nut", "vm_Le")
+        right_keys = ("vm_mat_screw",)
+        max_rows = max(len(left_keys), len(right_keys))
+        for idx in range(max_rows):
+            if idx < len(left_keys):
+                key = left_keys[idx]
+                spec = fields_by_key.get(key)
+                if spec is not None:
+                    add_field(spec, row_idx, 0)
+                    used_keys.add(key)
+            if idx < len(right_keys):
+                key = right_keys[idx]
+                spec = fields_by_key.get(key)
+                if spec is not None:
+                    add_field(spec, row_idx, 3)
+                    used_keys.add(key)
+            row_idx += 1
+
+        ctk.CTkLabel(left, text="Dati funzionamento", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=row_idx, column=0, columnspan=6, sticky="w", padx=10, pady=(8, 2)
+        )
+        row_idx += 1
+
+        for key, col_base in (("vm_mode", 0), ("vm_T", 0), ("vm_F", 3)):
+            spec = fields_by_key.get(key)
+            if spec is None:
+                continue
+            if key == "vm_mode":
+                add_field(spec, row_idx, col_base)
+                used_keys.add(key)
+                row_idx += 1
+                continue
+            add_field(spec, row_idx, col_base)
+            used_keys.add(key)
+        row_idx += 1
+
+        for spec in self.fields:
+            if spec.key in used_keys:
+                continue
+            add_field(spec, row_idx, 0)
+            row_idx += 1
+
+        return row_idx
+
+    def _layout_gear_fields(self, left, add_field: Callable[[FieldSpec, int, int], None]) -> int:
+        fields_by_key = {f.key: f for f in self.fields}
+        used_keys: set[str] = set()
+        row_idx = 1
+
+        common_keys = ("m", "mn", "alpha", "beta", "sigma", "q", "aw", "x_mode")
+        for key in common_keys:
+            spec = fields_by_key.get(key)
+            if spec is None:
+                continue
+            add_field(spec, row_idx, 0)
+            used_keys.add(key)
+            row_idx += 1
+
+        gear1_keys: list[str] = []
+        gear2_keys: list[str] = []
+        for key in ("z1", "n1"):
+            if key in fields_by_key and key not in used_keys:
+                gear1_keys.append(key)
+                used_keys.add(key)
+        for key in ("z2", "n2"):
+            if key in fields_by_key and key not in used_keys:
+                gear2_keys.append(key)
+                used_keys.add(key)
+
+        for spec in self.fields:
+            key = spec.key
+            if key in used_keys:
+                continue
+            if key.endswith("1"):
+                gear1_keys.append(key)
+                used_keys.add(key)
+            elif key.endswith("2"):
+                gear2_keys.append(key)
+                used_keys.add(key)
+
+        if gear1_keys or gear2_keys:
+            ctk.CTkLabel(left, text="Ingranaggio 1", font=ctk.CTkFont(size=14, weight="bold")).grid(
+                row=row_idx, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2)
+            )
+            ctk.CTkLabel(left, text="Ingranaggio 2", font=ctk.CTkFont(size=14, weight="bold")).grid(
+                row=row_idx, column=3, columnspan=3, sticky="w", padx=10, pady=(8, 2)
+            )
+            row_idx += 1
+
+            max_rows = max(len(gear1_keys), len(gear2_keys))
+            for idx in range(max_rows):
+                if idx < len(gear1_keys):
+                    add_field(fields_by_key[gear1_keys[idx]], row_idx, 0)
+                if idx < len(gear2_keys):
+                    add_field(fields_by_key[gear2_keys[idx]], row_idx, 3)
+                row_idx += 1
+
+        for spec in self.fields:
+            if spec.key in used_keys:
+                continue
+            add_field(spec, row_idx, 0)
+            row_idx += 1
+
+        return row_idx
 
     def _on_mode_change(self, *_args) -> None:
         self._apply_mode_inputs_state()
@@ -1995,9 +2194,56 @@ class CalculatorPanel(ctk.CTkFrame):
     def _on_disc_standard_change(self, *_args) -> None:
         self._load_disc_spring_from_selection()
 
+    def _has_screw_thread_family_fields(self) -> bool:
+        required = ("vm_thread_family", "vm_thread_std")
+        return all(k in self.vars for k in required) and "vm_thread_std" in self.widgets
+
+    def _apply_screw_thread_family_filter(self) -> None:
+        if not self._has_screw_thread_family_fields():
+            return
+        family = (self.vars.get("vm_thread_family").get() or "").strip() if self.vars.get("vm_thread_family") else ""
+        options = list(_screw_thread_names_by_family(family))
+        if not options:
+            options = list(_screw_thread_names_by_family(SCREW_THREAD_FAMILY_CHOICES[0] if SCREW_THREAD_FAMILY_CHOICES else ""))
+
+        std_widget = self.widgets.get("vm_thread_std")
+        if isinstance(std_widget, ctk.CTkOptionMenu):
+            try:
+                std_widget.configure(values=options)
+            except Exception:
+                pass
+
+        current_std = (self.vars.get("vm_thread_std").get() or "").strip() if self.vars.get("vm_thread_std") else ""
+        if options and current_std not in options:
+            self.vars["vm_thread_std"].set(options[0])
+
+    def _has_screw_thread_fields(self) -> bool:
+        required = ("vm_thread_std", "vm_d", "vm_p")
+        return all(k in self.vars for k in required)
+
+    def _load_screw_thread_from_selection(self) -> None:
+        if not self._has_screw_thread_fields():
+            return
+        thread_name = (self.vars.get("vm_thread_std").get() or "").strip() if self.vars.get("vm_thread_std") else ""
+        if not thread_name or thread_name == "-":
+            return
+        try:
+            thread = _screw_thread_standard(thread_name)
+        except Exception:
+            return
+        self.vars["vm_d"].set(_fmt_number(thread.d_mm, digits=3))
+        self.vars["vm_p"].set(_fmt_number(thread.p_mm, digits=3))
+
+    def _on_screw_thread_change(self, *_args) -> None:
+        self._load_screw_thread_from_selection()
+
+    def _on_screw_thread_family_change(self, *_args) -> None:
+        self._apply_screw_thread_family_filter()
+        self._load_screw_thread_from_selection()
+
     def _get_reference_entry_colors(self):
         for ref_key, ref_widget in self.widgets.items():
-            if ref_key in ("f1", "f2", "F1", "F2"):
+            if ref_key in ("f1", "f2", "F1", "F2", "vm_T", "vm_F"):
                 continue
             if isinstance(ref_widget, ctk.CTkEntry):
                 try:
@@ -2076,6 +2322,15 @@ class CalculatorPanel(ctk.CTkFrame):
                 self._set_input_state("f2", enabled=True)
                 self._set_input_state("F1", enabled=False)
                 self._set_input_state("F2", enabled=False)
+        vm_mode_var = self.vars.get("vm_mode")
+        if vm_mode_var is not None:
+            vm_mode = (vm_mode_var.get() or "").strip()
+            if vm_mode == SCREW_VM_MODE_FORCE_FROM_TORQUE:
+                self._set_input_state("vm_T", enabled=True)
+                self._set_input_state("vm_F", enabled=False)
+            elif vm_mode == SCREW_VM_MODE_TORQUE_FROM_FORCE:
+                self._set_input_state("vm_T", enabled=False)
+                self._set_input_state("vm_F", enabled=True)
         self._apply_disc_inputs_state()
 
     def _parse_values(self) -> dict[str, CalcValue]:
@@ -2098,23 +2353,27 @@ class CalculatorPanel(ctk.CTkFrame):
         return parsed
 
     def _show_results(self, rows: CalcRows) -> None:
-        self.txt_results.configure(state="normal")
-        self.txt_results.delete("1.0", "end")
-        for label, value in rows:
-            value_txt = str(value or "").strip()
-            if not value_txt:
-                self.txt_results.insert("end", f"\n{label}\n")
-            else:
-                self.txt_results.insert("end", f"{label}: {value}\n")
-        self.txt_results.configure(state="disabled")
+        _render_results_colored(self.txt_results, rows, self.palette)
 
     def _on_calculate(self) -> None:
         try:
             values = self._parse_values()
             rows = self.calc_fn(values)
             self._show_results(rows)
-            self.var_status.set("Calcolo completato.")
-            self.lbl_status.configure(text_color=self.palette.ok)
+            global_outcome = ""
+            for label, value in rows:
+                if (label or "").strip().lower() == "esito globale":
+                    global_outcome = str(value or "").strip().upper()
+                    break
+            if global_outcome == "NON OK":
+                self.var_status.set("Calcolo completato: verifica globale NON OK.")
+                self.lbl_status.configure(text_color=self.palette.err)
+            elif global_outcome == "OK":
+                self.var_status.set("Calcolo completato: verifica globale OK.")
+                self.lbl_status.configure(text_color=self.palette.ok)
+            else:
+                self.var_status.set("Calcolo completato.")
+                self.lbl_status.configure(text_color=self.palette.ok)
         except Exception as exc:
             self.var_status.set(str(exc))
             self.lbl_status.configure(text_color=self.palette.err)
@@ -2124,6 +2383,7 @@ class CalculatorPanel(ctk.CTkFrame):
             self.vars[key].set(default)
         self._load_spring_material_data_from_selection()
         self._load_beam_material_data_from_selection()
+        self._on_screw_thread_family_change()
         self._on_disc_source_change()
         self._apply_mode_inputs_state()
         self.txt_results.configure(state="normal")
@@ -2133,15 +2393,70 @@ class CalculatorPanel(ctk.CTkFrame):
         self.lbl_status.configure(text_color=self.palette.muted_fg)
 
 
+class GearCombinedPanel(ctk.CTkFrame):
+    def __init__(
+        self,
+        master,
+        group_title: str,
+        calculators: Sequence[tuple[str, str, str, Sequence[FieldSpec], CalcFn]],
+        palette: Palette,
+    ) -> None:
+        super().__init__(master)
+        self.group_title = group_title
+        self.calculators = tuple(calculators)
+        self.palette = palette
+        mode_values = [mode_label for mode_label, *_ in self.calculators]
+        self.var_mode = ctk.StringVar(value=mode_values[0] if mode_values else "")
+        self.panels_by_mode: dict[str, CalculatorPanel] = {}
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        top = ctk.CTkFrame(self)
+        top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        top.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(top, text=f"{self.group_title} - Tipo dentatura").grid(
+            row=0, column=0, sticky="w", padx=(10, 8), pady=10
+        )
+        self.mode_menu = ctk.CTkOptionMenu(top, values=mode_values, variable=self.var_mode, command=self._on_mode_change)
+        self.mode_menu.grid(row=0, column=1, sticky="w", padx=(0, 10), pady=10)
+
+        self.host = ctk.CTkFrame(self)
+        self.host.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        self.host.grid_columnconfigure(0, weight=1)
+        self.host.grid_rowconfigure(0, weight=1)
+
+        for mode_label, calc_title, description, fields, calc_fn in self.calculators:
+            panel = CalculatorPanel(self.host, calc_title, description, fields, calc_fn, self.palette)
+            panel.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+            self.panels_by_mode[mode_label] = panel
+
+        self._set_active_mode()
+
+    def _on_mode_change(self, _selected: str) -> None:
+        self._set_active_mode()
+
+    def _set_active_mode(self) -> None:
+        mode = (self.var_mode.get() or "").strip()
+        for key, panel in self.panels_by_mode.items():
+            if key == mode:
+                panel.grid()
+            else:
+                panel.grid_remove()
+
+
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.spring_db = SPRING_DB
         self.beam_db = BEAM_DB
         self.tol_db = TOL_DB
+        self.screw_db = SCREW_DB
         self.spring_db.ensure_seeded()
         self.beam_db.ensure_seeded()
         self.tol_db.ensure_seeded()
+        self.screw_db.ensure_seeded()
         self.spring_material_names = self.spring_db.list_names()
         self.beam_material_names = self.beam_db.list_names()
         self.beam_section_names = self.beam_db.list_section_names()
@@ -2149,6 +2464,8 @@ class App(ctk.CTk):
         self.tol_hole_positions = self.tol_db.list_iso_positions("HOLE")
         self.tol_shaft_positions = self.tol_db.list_iso_positions("SHAFT")
         self.tol_iso_grades = self.tol_db.list_iso_grades("HOLE")
+        self.screw_thread_names = self.screw_db.list_thread_names()
+        self.screw_material_names = self.screw_db.list_material_names()
         if not self.spring_material_names:
             raise RuntimeError("DB materiali molle vuoto.")
         if not self.beam_material_names:
@@ -2159,6 +2476,10 @@ class App(ctk.CTk):
             raise RuntimeError("DB materiali tolleranze vuoto.")
         if not self.tol_hole_positions or not self.tol_shaft_positions or not self.tol_iso_grades:
             raise RuntimeError("DB tolleranze ISO foro/albero vuoto.")
+        if not self.screw_thread_names:
+            raise RuntimeError("DB filettature vite-madrevite vuoto.")
+        if not self.screw_material_names:
+            raise RuntimeError("DB materiali vite-madrevite vuoto.")
         self.disc_spring_names = self.spring_db.list_disc_spring_names()
 
         self.palette = apply_style(dark=True)
@@ -2192,7 +2513,7 @@ class App(ctk.CTk):
         main_tabs = ctk.CTkTabview(self)
         main_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
 
-        self._build_category(main_tabs.add("Ingranaggi"), GEAR_CALCS)
+        self._build_gear_category(main_tabs.add("Ingranaggi"), GEAR_CALCS)
         self._build_category(
             main_tabs.add("Molle"),
             get_spring_calcs(self.spring_material_names, self.disc_spring_names),
@@ -2208,27 +2529,66 @@ class App(ctk.CTk):
             text_color=self.palette.warn,
         ).pack(anchor="w")
 
+    def _build_gear_category(self, container, calculators: Sequence[tuple[str, str, Sequence[FieldSpec], CalcFn]]) -> None:
+        grouped_tabs = ctk.CTkTabview(container)
+        grouped_tabs.pack(fill="both", expand=True, padx=8, pady=8)
+
+        calculators_by_title = {
+            title: (description, fields, calc_fn) for title, description, fields, calc_fn in calculators
+        }
+        grouped_titles: set[str] = set()
+
+        for group_title, group_tabs in GEAR_TAB_GROUPS:
+            group_entries = [
+                (tab_label, calc_title, *calculators_by_title[calc_title])
+                for tab_label, calc_title in group_tabs
+                if calc_title in calculators_by_title
+            ]
+            if not group_entries:
+                continue
+            grouped_titles.update(calc_title for _tab_label, calc_title, *_ in group_entries)
+
+            group_container = grouped_tabs.add(group_title)
+            panel = GearCombinedPanel(group_container, group_title, group_entries, self.palette)
+            panel.pack(fill="both", expand=True, padx=6, pady=6)
+
+        for title, description, fields, calc_fn in calculators:
+            if title in grouped_titles:
+                continue
+            tab = grouped_tabs.add(title)
+            panel = self._create_panel(tab, title, description, fields, calc_fn)
+            panel.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _create_panel(
+        self,
+        tab,
+        title: str,
+        description: str,
+        fields: Sequence[FieldSpec],
+        calc_fn: CalcFn,
+    ):
+        if title == "Flessione":
+            return BeamBendingPanel(tab, self.palette, self.beam_material_names, self.beam_section_names)
+        if title == "Torsione":
+            return BeamTorsionPanel(tab, self.palette, self.beam_material_names)
+        if title == "Accoppiamento foro/albero":
+            return FitTolerancePanel(
+                tab,
+                self.palette,
+                self.tol_material_names,
+                self.tol_hole_positions,
+                self.tol_shaft_positions,
+                self.tol_iso_grades,
+            )
+        return CalculatorPanel(tab, title, description, fields, calc_fn, self.palette)
+
     def _build_category(self, container, calculators: Sequence[tuple[str, str, Sequence[FieldSpec], CalcFn]]) -> None:
         subtabs = ctk.CTkTabview(container)
         subtabs.pack(fill="both", expand=True, padx=8, pady=8)
 
         for title, description, fields, calc_fn in calculators:
             tab = subtabs.add(title)
-            if title == "Flessione":
-                panel = BeamBendingPanel(tab, self.palette, self.beam_material_names, self.beam_section_names)
-            elif title == "Torsione":
-                panel = BeamTorsionPanel(tab, self.palette, self.beam_material_names)
-            elif title == "Accoppiamento foro/albero":
-                panel = FitTolerancePanel(
-                    tab,
-                    self.palette,
-                    self.tol_material_names,
-                    self.tol_hole_positions,
-                    self.tol_shaft_positions,
-                    self.tol_iso_grades,
-                )
-            else:
-                panel = CalculatorPanel(tab, title, description, fields, calc_fn, self.palette)
+            panel = self._create_panel(tab, title, description, fields, calc_fn)
             panel.pack(fill="both", expand=True, padx=6, pady=6)
 
 
