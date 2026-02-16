@@ -1,4 +1,4 @@
 from __future__ import annotations
 
 APP_NAME = "Calcoli Meccanici"
-APP_VERSION = "1.3.48"
+APP_VERSION = "1.3.50"

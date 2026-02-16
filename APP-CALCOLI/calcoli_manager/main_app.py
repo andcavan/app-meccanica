@@ -47,6 +47,7 @@ from .calculation_engine import (
     _as_int,
     _beam_material,
     _beam_section_std,
+    _get_suggested_mu,
     calc_beam_bending_advanced,
     calc_beam_torsion_advanced,
     calc_tolerance_fit_iso_thermal,
@@ -1924,6 +1925,13 @@ class CalculatorPanel(ctk.CTkFrame):
             vm_thread_var.trace_add("write", self._on_screw_thread_change)
             self.after(0, self._load_screw_thread_from_selection)
 
+        vm_mat_screw_var = self.vars.get("vm_mat_screw")
+        vm_mat_nut_var = self.vars.get("vm_mat_nut")
+        if vm_mat_screw_var is not None and vm_mat_nut_var is not None:
+            vm_mat_screw_var.trace_add("write", self._on_power_screw_material_change)
+            vm_mat_nut_var.trace_add("write", self._on_power_screw_material_change)
+            self.after(0, self._on_power_screw_material_change)
+
     def _layout_input_fields(self, left, add_field: Callable[[FieldSpec, int, int], None]) -> int:
         if self.title == SCREW_NUT_PANEL_TITLE:
             return self._layout_power_screw_fields(left, add_field)
@@ -2241,6 +2249,20 @@ class CalculatorPanel(ctk.CTkFrame):
         self._apply_screw_thread_family_filter()
         self._load_screw_thread_from_selection()
 
+    def _on_power_screw_material_change(self, *_args) -> None:
+        if "vm_mat_screw" not in self.vars or "vm_mat_nut" not in self.vars or "vm_mu" not in self.vars:
+            return
+
+        screw_mat_name = (self.vars["vm_mat_screw"].get() or "").strip()
+        nut_mat_name = (self.vars["vm_mat_nut"].get() or "").strip()
+
+        if not screw_mat_name or not nut_mat_name:
+            return
+
+        suggested_mu = _get_suggested_mu(screw_mat_name, nut_mat_name)
+        if suggested_mu is not None:
+            self.vars["vm_mu"].set(_fmt_number(suggested_mu, digits=3))
+
     def _get_reference_entry_colors(self):
         for ref_key, ref_widget in self.widgets.items():
             if ref_key in ("f1", "f2", "F1", "F2", "vm_T", "vm_F"):
@@ -2385,6 +2407,7 @@ class CalculatorPanel(ctk.CTkFrame):
         self._load_beam_material_data_from_selection()
         self._on_screw_thread_family_change()
         self._on_disc_source_change()
+        self._on_power_screw_material_change()
         self._apply_mode_inputs_state()
         self.txt_results.configure(state="normal")
         self.txt_results.delete("1.0", "end")

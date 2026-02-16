@@ -292,6 +292,63 @@ def _power_screw_profile_dims(d_mm: float, p_mm: float, thread: ScrewThreadStand
     return d2, d3, d1
 
 
+def _get_screw_material_category_from_name(name: str) -> str:
+    """Estrae una categoria generica dal nome del materiale per vite/madrevite."""
+    uname = (name or "").strip().upper()
+    compact = "".join(ch for ch in uname if ch.isalnum())
+
+    if "ACCIAIO INOX" in uname or "INOX" in uname or compact.startswith("AISI3"):
+        return "ACCIAIO INOX"
+    if "ACCIAIO" in uname or "C45" in compact or "42CRMO4" in compact:
+        return "ACCIAIO"
+    if "BRONZO" in uname or "CUSN" in compact:
+        return "BRONZO"
+    if "GHISA" in uname or "GJL" in compact:
+        return "GHISA"
+    return "SCONOSCIUTO"
+
+
+def _get_suggested_mu(screw_mat_name: str, nut_mat_name: str) -> float | None:
+    """
+    Suggerisce un coefficiente di attrito basato sulla coppia di materiali.
+    NOTA: Dati di esempio (attrito a secco), da sostituire con un DB dedicato.
+    """
+    screw_cat = _get_screw_material_category_from_name(screw_mat_name)
+    nut_cat = _get_screw_material_category_from_name(nut_mat_name)
+    if "SCONOSCIUTO" in (screw_cat, nut_cat):
+        return None
+
+    # Esempi di coppie (valori a secco). Le chiavi sono tuple ordinate per essere commutative.
+    friction_pairs = {
+        ("ACCIAIO", "ACCIAIO"): 0.15,
+        ("ACCIAIO", "BRONZO"): 0.18,
+        ("ACCIAIO INOX", "BRONZO"): 0.16,
+        ("ACCIAIO", "GHISA"): 0.17,
+    }
+
+    key = tuple(sorted((screw_cat, nut_cat)))
+    value = friction_pairs.get(key)
+    if value is not None:
+        return value
+
+    # Fallback: se una coppia con ACCIAIO INOX non e' trovata, prova con ACCIAIO generico.
+    c1, c2 = key
+    has_inox = False
+    if c1 == "ACCIAIO INOX":
+        c1 = "ACCIAIO"
+        has_inox = True
+    if c2 == "ACCIAIO INOX":
+        c2 = "ACCIAIO"
+        has_inox = True
+
+    if has_inox:
+        fallback_key = tuple(sorted((c1, c2)))
+        if fallback_key != key:
+            return friction_pairs.get(fallback_key)
+
+    return None
+
+
 def _gear_correction_distribution(a_nom: float, module_ref: float, aw_raw: CalcValue, mode_raw: CalcValue) -> tuple[float, float, float, float]:
     _require_gt_zero("Modulo riferimento", module_ref)
     aw = a_nom if aw_raw is None else float(aw_raw)
@@ -952,6 +1009,8 @@ def calc_power_screw(values: dict[str, CalcValue]) -> CalcRows:
     mat_screw = _screw_nut_material(mat_screw_name)
     mat_nut = _screw_nut_material(mat_nut_name)
 
+    suggested_mu = _get_suggested_mu(mat_screw.name, mat_nut.name)
+
     d2, d3, d1 = _power_screw_profile_dims(d, p, thread)
     if d2 <= 0 or d3 <= 0 or d1 <= 0:
         raise ValueError("Geometria filettatura non valida (diametri interni <= 0).")
@@ -1014,8 +1073,7 @@ def calc_power_screw(values: dict[str, CalcValue]) -> CalcRows:
     screw_ok = sigma_vm <= mat_screw.sigma_amm_mpa and tau_thread_screw <= mat_screw.tau_amm_mpa
     nut_ok = p_bearing <= mat_nut.sigma_amm_mpa and tau_thread_nut <= mat_nut.tau_amm_mpa
     overall_ok = screw_ok and nut_ok
-
-    return [
+    rows: CalcRows = [
         ("Geometria filettatura", ""),
         ("Standard selezionato", thread.name),
         ("Famiglia", thread.family),
@@ -1061,6 +1119,11 @@ def calc_power_screw(values: dict[str, CalcValue]) -> CalcRows:
         ("SF minimo globale", _v(sf_min_global, digits=4)),
         ("Esito globale", "OK" if overall_ok else "NON OK"),
     ]
+
+    if suggested_mu is not None:
+        rows.insert(19, ("Attrito suggerito (a secco)", _v(suggested_mu, digits=3)))
+
+    return rows
 
 
 def calc_spring_comp_round(values: dict[str, CalcValue]) -> CalcRows:
@@ -2557,4 +2620,3 @@ TOL_CALCS: list[tuple[str, str, Sequence[FieldSpec], CalcFn]] = [
         calc_tolerance_chain,
     ),
 ]
-
