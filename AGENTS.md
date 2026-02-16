@@ -15,6 +15,7 @@ Le regole locali di progetto possono sovrascrivere queste istruzioni.
 - Alla creazione dell'app genera la versione.
 - Ogni modifica o upgrade deve aggiornare la versione.
 - Suggerisci miglioramenti o alternative alle mie richieste.
+
 ## Codice
 - Mantieni modifiche piccole e focalizzate.
 - Non cambiare parti non richieste.
