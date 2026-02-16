@@ -1657,12 +1657,6 @@ class FitTolerancePanel(ctk.CTkFrame):
     def _show_results(self, rows: CalcRows) -> None:
         _render_results_colored(self.txt_results, rows, self.palette)
 
-    def _draw_interval(self, x1: float, x2: float, y: float, color: str, label: str) -> None:
-        self.canvas.create_line(x1, y, x2, y, fill=color, width=8, capstyle="round")
-        self.canvas.create_text(8, y, text=label, fill=self.palette.fg, anchor="w")
-        self.canvas.create_line(x1, y - 8, x1, y + 8, fill=color, width=2)
-        self.canvas.create_line(x2, y - 8, x2, y + 8, fill=color, width=2)
-
     def _draw_graph(self) -> None:
         self.canvas.delete("all")
         data = self.diagram_data
@@ -1674,11 +1668,14 @@ class FitTolerancePanel(ctk.CTkFrame):
             self.canvas.create_text(w // 2, h // 2, text="Nessun grafico disponibile.", fill=self.palette.muted_fg)
             return
 
-        margin_l, margin_r, margin_t, margin_b = 110, 20, 20, 48
+        # Margini
+        margin_l, margin_r = 20, 20
+        margin_t, margin_b = 30, 30
         plot_w = max(10, w - margin_l - margin_r)
         plot_h = max(10, h - margin_t - margin_b)
 
-        values = (
+        # Calcolo scala X (Diametri)
+        vals = [
             data["hole_min_20"],
             data["hole_max_20"],
             data["shaft_min_20"],
@@ -1687,55 +1684,61 @@ class FitTolerancePanel(ctk.CTkFrame):
             data["hole_max_t"],
             data["shaft_min_t"],
             data["shaft_max_t"],
-        )
-        v_min = min(values)
-        v_max = max(values)
+            data["d_nom"],
+        ]
+        v_min = min(vals)
+        v_max = max(vals)
         span = max(v_max - v_min, 0.001)
-        pad = span * 0.18
-        axis_min = v_min - pad
-        axis_max = v_max + pad
+        # Padding 15% per lato
+        axis_min = v_min - (span * 0.15)
+        axis_max = v_max + (span * 0.15)
 
-        def px(v: float) -> float:
+        def x_pos(v: float) -> float:
             return margin_l + ((v - axis_min) / (axis_max - axis_min)) * plot_w
 
-        y_hole_20 = margin_t + (plot_h * 0.20)
-        y_shaft_20 = margin_t + (plot_h * 0.36)
-        y_hole_t = margin_t + (plot_h * 0.62)
-        y_shaft_t = margin_t + (plot_h * 0.78)
+        # Linea nominale
+        x_nom = x_pos(data["d_nom"])
+        self.canvas.create_line(x_nom, margin_t, x_nom, h - margin_b, fill=self.palette.muted_fg, dash=(4, 4))
+        self.canvas.create_text(x_nom, margin_t - 5, text=f"Nom. {_fmt_number(data['d_nom'])}", fill=self.palette.muted_fg, anchor="s", font=("Arial", 9))
 
-        self._draw_interval(px(data["hole_min_20"]), px(data["hole_max_20"]), y_hole_20, "#4ea8de", "Foro @20C")
-        self._draw_interval(px(data["shaft_min_20"]), px(data["shaft_max_20"]), y_shaft_20, "#f4a261", "Albero @20C")
-        self._draw_interval(px(data["hole_min_t"]), px(data["hole_max_t"]), y_hole_t, "#2a9d8f", "Foro @T")
-        self._draw_interval(px(data["shaft_min_t"]), px(data["shaft_max_t"]), y_shaft_t, "#e76f51", "Albero @T")
+        # Funzione disegno barra
+        def draw_bar(y_mid: float, v_min: float, v_max: float, color: str, label: str, is_top: bool):
+            x1 = x_pos(v_min)
+            x2 = x_pos(v_max)
+            if abs(x2 - x1) < 2:
+                x2 = x1 + 2  # Min width visibility
 
-        x_nom = px(data["d_nom"])
-        self.canvas.create_line(x_nom, margin_t - 2, x_nom, h - margin_b + 6, fill=self.palette.border, dash=(3, 3))
-        self.canvas.create_text(x_nom, margin_t - 6, text="d nominale", fill=self.palette.muted_fg, anchor="s")
+            bar_h = 20
+            y1 = y_mid - bar_h if is_top else y_mid
+            y2 = y_mid if is_top else y_mid + bar_h
 
-        y_axis = h - margin_b + 10
-        self.canvas.create_line(margin_l, y_axis, margin_l + plot_w, y_axis, fill=self.palette.border)
-        self.canvas.create_text(margin_l, y_axis + 14, text=_fmt_number(axis_min, 5), fill=self.palette.muted_fg, anchor="w")
-        self.canvas.create_text(
-            margin_l + plot_w, y_axis + 14, text=_fmt_number(axis_max, 5), fill=self.palette.muted_fg, anchor="e"
-        )
-        self.canvas.create_text(
-            margin_l + (plot_w / 2.0),
-            y_axis + 14,
-            text=f"T={_fmt_number(data['temp_c'])} gradiC (rif. 20 gradiC)",
-            fill=self.palette.muted_fg,
-            anchor="n",
-        )
+            # Rettangolo
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=self.palette.border)
 
-        self.canvas.create_text(
-            margin_l,
-            h - 6,
-            text=(
-                f"Delta foro-albero @20C: {_fmt_number(data['j_min_20'], 6)} .. {_fmt_number(data['j_max_20'], 6)} mm   |   "
-                f"Delta foro-albero @T: {_fmt_number(data['j_min_t'], 6)} .. {_fmt_number(data['j_max_t'], 6)} mm"
-            ),
-            fill=self.palette.fg,
-            anchor="sw",
-        )
+            # Etichetta principale (Foro/Albero)
+            lbl_y = y1 - 2 if is_top else y2 + 2
+            lbl_anchor = "s" if is_top else "n"
+            self.canvas.create_text((x1 + x2) / 2, lbl_y, text=label, fill=self.palette.fg, anchor=lbl_anchor, font=("Arial", 10, "bold"))
+
+            # Etichette valori min/max
+            val_y = y1 - 14 if is_top else y2 + 14
+            self.canvas.create_text(x1, val_y, text=_fmt_number(v_min, 3), fill=self.palette.muted_fg, anchor=lbl_anchor, font=("Arial", 8))
+            self.canvas.create_text(x2, val_y, text=_fmt_number(v_max, 3), fill=self.palette.muted_fg, anchor=lbl_anchor, font=("Arial", 8))
+
+        # Layout verticale: due zone @20C e @T
+        y_c1 = margin_t + (plot_h * 0.25)
+        y_c2 = margin_t + (plot_h * 0.75)
+
+        # Titoli zone
+        self.canvas.create_text(margin_l, y_c1 - 40, text="Riferimento 20°C", fill=self.palette.fg, anchor="w", font=("Arial", 11, "bold"))
+        self.canvas.create_text(margin_l, y_c2 - 40, text=f"Esercizio {data['temp_c']}°C", fill=self.palette.fg, anchor="w", font=("Arial", 11, "bold"))
+
+        # Disegno barre: Foro sopra, Albero sotto la linea mediana della zona
+        draw_bar(y_c1, data["hole_min_20"], data["hole_max_20"], "#4ea8de", "Foro", True)
+        draw_bar(y_c1, data["shaft_min_20"], data["shaft_max_20"], "#f4a261", "Albero", False)
+
+        draw_bar(y_c2, data["hole_min_t"], data["hole_max_t"], "#2a9d8f", "Foro", True)
+        draw_bar(y_c2, data["shaft_min_t"], data["shaft_max_t"], "#e76f51", "Albero", False)
 
     def _on_calculate(self) -> None:
         try:

@@ -1293,6 +1293,7 @@ def calc_spring_extension_round(values: dict[str, CalcValue]) -> CalcRows:
     if Dm <= d:
         raise ValueError("Diametro medio deve essere maggiore del diametro filo.")
 
+    Di = Dm - d
     C = Dm / d
     if C <= 1.1:
         raise ValueError("Indice molla C troppo basso.")
@@ -1306,6 +1307,9 @@ def calc_spring_extension_round(values: dict[str, CalcValue]) -> CalcRows:
     tau1 = 0.0 if F1 == 0 else Kw * ((8.0 * abs(F1) * Dm) / (math.pi * d**3))
     tau2 = 0.0 if F2 == 0 else Kw * ((8.0 * abs(F2) * Dm) / (math.pi * d**3))
     Ls = (Na + 2.0) * d
+    
+    # Stima lunghezza totale libera inclusi occhielli (approssimazione H_hook = Di)
+    L_tot_free = Ls + (2.0 * Di)
 
     extra_notes: list[str] = []
     if F1 < F0:
@@ -1320,6 +1324,7 @@ def calc_spring_extension_round(values: dict[str, CalcValue]) -> CalcRows:
         ("Modo calcolo", mode),
         ("Diametro filo d", _v(d, "mm")),
         ("Diametro medio Dm", _v(Dm, "mm")),
+        ("Diametro interno Di", _v(Di, "mm")),
         ("Spire attive Na", _v(Na)),
         ("Indice molla C", _v(C, digits=6)),
         _section_row("CONDIZIONI DI LAVORO"),
@@ -1328,6 +1333,7 @@ def calc_spring_extension_round(values: dict[str, CalcValue]) -> CalcRows:
         ("Precarico iniziale F0", _v(F0, "N")),
         ("Allungamento attivo max x_max", _v(x_max, "mm")),
         ("Lunghezza corpo molla a blocco Ls", _v(Ls, "mm")),
+        ("Lunghezza libera totale stima (Ls+2Di)", _v(L_tot_free, "mm")),
         ("Fattore Wahl Kw", _v(Kw, digits=6)),
         _section_row("DATI PUNTI DI LAVORO"),
         *_work_points_rows(f1, F1, f2, F2, "mm"),
